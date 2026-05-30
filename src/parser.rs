@@ -1274,6 +1274,11 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
         }
 
         if let Some((id, member)) = parse_class_member_line(line) {
+            graph.ensure_node(
+                &id,
+                labels.get(&id).cloned(),
+                Some(crate::ir::NodeShape::Rectangle),
+            );
             members.entry(id).or_default().push(member);
             continue;
         }
@@ -6252,6 +6257,17 @@ A["foo & bar"] & B --> C"#;
         assert_eq!(
             parsed.graph.nodes.get("Duck").unwrap().label,
             "<<service>>\nDuck\n---\n+quack()"
+        );
+    }
+
+    #[test]
+    fn parse_class_member_line_creates_node() {
+        let input = "classDiagram\nBankAccount : +String owner\nBankAccount : +deposit(amount)";
+        let parsed = parse_mermaid(input).unwrap();
+        let node = parsed.graph.nodes.get("BankAccount").unwrap();
+        assert_eq!(
+            node.label,
+            "BankAccount\n---\n+String owner\n---\n+deposit(amount)"
         );
     }
 
