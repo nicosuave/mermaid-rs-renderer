@@ -918,7 +918,7 @@ fn parse_sequence_participant(
 ) -> Option<(String, Option<String>, crate::ir::NodeShape)> {
     let lowered = line.to_ascii_lowercase();
     let keywords = [
-        ("participant ", crate::ir::NodeShape::ActorBox),
+        ("participant ", crate::ir::NodeShape::Rectangle),
         ("actor ", crate::ir::NodeShape::ActorBox),
         ("boundary ", crate::ir::NodeShape::ActorBox),
         ("control ", crate::ir::NodeShape::ActorBox),
@@ -1131,6 +1131,7 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
     let (lines, init_config) = preprocess_input(input)?;
 
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
+    let mut stereotypes: HashMap<String, Vec<String>> = HashMap::new();
     let mut labels: HashMap<String, String> = HashMap::new();
     let mut current_class: Option<String> = None;
 
@@ -1159,17 +1160,47 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
             if let Some(end_idx) = line.find('}') {
                 let fragment = line[..end_idx].trim();
                 if !fragment.is_empty() {
-                    members
-                        .entry(active.clone())
-                        .or_default()
-                        .push(fragment.to_string());
+                    if is_class_stereotype(fragment) {
+                        stereotypes
+                            .entry(active.clone())
+                            .or_default()
+                            .push(fragment.to_string());
+                    } else {
+                        members
+                            .entry(active.clone())
+                            .or_default()
+                            .push(fragment.to_string());
+                    }
                 }
                 current_class = None;
             } else {
-                members
-                    .entry(active.clone())
-                    .or_default()
-                    .push(line.to_string());
+                if is_class_stereotype(line) {
+                    stereotypes
+                        .entry(active.clone())
+                        .or_default()
+                        .push(line.to_string());
+                } else {
+                    members
+                        .entry(active.clone())
+                        .or_default()
+                        .push(line.to_string());
+                }
+            }
+            continue;
+        }
+
+        if let Some((stereotype, class_id)) = parse_class_stereotype_line(line) {
+            if let Some(class_id) = class_id {
+                let (id, label) = normalize_class_id(&class_id);
+                if let Some(label) = label {
+                    labels.insert(id.clone(), label);
+                }
+                graph.ensure_node(
+                    &id,
+                    labels.get(&id).cloned(),
+                    Some(crate::ir::NodeShape::Rectangle),
+                );
+                stereotypes.entry(id).or_default().push(stereotype);
             }
             continue;
         }
@@ -1227,7 +1258,11 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
                 if let Some(body) = body {
                     for entry in split_class_body(&body) {
                         if !entry.is_empty() {
-                            members.entry(id.clone()).or_default().push(entry);
+                            if is_class_stereotype(&entry) {
+                                stereotypes.entry(id.clone()).or_default().push(entry);
+                            } else {
+                                members.entry(id.clone()).or_default().push(entry);
+                            }
                         }
                     }
                 }
@@ -1250,6 +1285,9 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
             .cloned()
             .unwrap_or_else(|| node.label.clone());
         let mut lines = Vec::new();
+        if let Some(items) = stereotypes.get(id) {
+            lines.extend(items.iter().cloned());
+        }
         lines.push(class_name.clone());
         if let Some(items) = members.get(id)
             && !items.is_empty()
@@ -1279,6 +1317,29 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
     }
 
     Ok(ParseOutput { graph, init_config })
+}
+
+fn is_class_stereotype(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("<<") && trimmed.ends_with(">>") && trimmed.len() >= 4
+}
+
+fn parse_class_stereotype_line(line: &str) -> Option<(String, Option<String>)> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("<<") {
+        return None;
+    }
+    let end = trimmed[2..].find(">>")? + 4;
+    let stereotype = trimmed[..end].to_string();
+    let class_id = trimmed[end..].trim();
+    Some((
+        stereotype,
+        if class_id.is_empty() {
+            None
+        } else {
+            Some(class_id.to_string())
+        },
+    ))
 }
 
 fn is_er_card_char(ch: char) -> bool {
@@ -5890,11 +5951,18 @@ mod tests {
         let input = r#"flowchart LR
 A["reads artifacts & computes deps"] --> B"#;
         let parsed = parse_mermaid(input).unwrap();
-        assert_eq!(parsed.graph.nodes.len(), 2, "ampersand in label must not create extra nodes");
+        assert_eq!(
+            parsed.graph.nodes.len(),
+            2,
+            "ampersand in label must not create extra nodes"
+        );
         assert_eq!(parsed.graph.edges.len(), 1);
         assert!(parsed.graph.nodes.contains_key("A"));
         assert!(parsed.graph.nodes.contains_key("B"));
-        assert_eq!(parsed.graph.nodes["A"].label, "reads artifacts & computes deps");
+        assert_eq!(
+            parsed.graph.nodes["A"].label,
+            "reads artifacts & computes deps"
+        );
     }
 
     #[test]
@@ -6171,6 +6239,20 @@ A["foo & bar"] & B --> C"#;
         let label = &parsed.graph.nodes.get("Animal").unwrap().label;
         assert!(label.contains("Animal"));
         assert!(label.contains("name"));
+    }
+
+    #[test]
+    fn parse_class_diagram_preserves_stereotypes() {
+        let input = "classDiagram\n<<interface>> Animal\nclass Duck {\n<<service>>\n+quack()\n}";
+        let parsed = parse_mermaid(input).unwrap();
+        assert_eq!(
+            parsed.graph.nodes.get("Animal").unwrap().label,
+            "<<interface>>\nAnimal"
+        );
+        assert_eq!(
+            parsed.graph.nodes.get("Duck").unwrap().label,
+            "<<service>>\nDuck\n---\n+quack()"
+        );
     }
 
     #[test]
@@ -6451,8 +6533,23 @@ A["foo & bar"] & B --> C"#;
         // Verify the display label is "Alice" (right side of "as")
         let node = parsed.graph.nodes.get("A").unwrap();
         assert_eq!(node.label, "Alice");
+        assert_eq!(node.shape, crate::ir::NodeShape::Rectangle);
         assert_eq!(parsed.graph.edges.len(), 2);
         assert_eq!(parsed.graph.edges[1].style, crate::ir::EdgeStyle::Dotted);
+    }
+
+    #[test]
+    fn parse_sequence_actor_shape() {
+        let input = "sequenceDiagram\nactor U as User\nparticipant API\nU->>API: open";
+        let parsed = parse_mermaid(input).unwrap();
+        assert_eq!(
+            parsed.graph.nodes.get("U").unwrap().shape,
+            crate::ir::NodeShape::ActorBox
+        );
+        assert_eq!(
+            parsed.graph.nodes.get("API").unwrap().shape,
+            crate::ir::NodeShape::Rectangle
+        );
     }
 
     #[test]
