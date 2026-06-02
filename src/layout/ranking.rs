@@ -12,6 +12,56 @@ pub(super) fn rank_edges_for_manual_layout(
         return layout_edges.to_vec();
     }
 
+    let layout_set: HashSet<&str> = layout_node_ids.iter().map(String::as_str).collect();
+    let mut order_by_id: HashMap<String, usize> = layout_node_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, id)| (id.clone(), idx))
+        .collect();
+    for (id, order) in &graph.node_order {
+        if layout_set.contains(id.as_str()) {
+            order_by_id.insert(id.clone(), *order);
+        }
+    }
+
+    let is_forward = |edge: &crate::ir::Edge| -> bool {
+        if edge.from == edge.to {
+            return false;
+        }
+        let from_order = order_by_id.get(&edge.from).copied().unwrap_or(usize::MAX);
+        let to_order = order_by_id.get(&edge.to).copied().unwrap_or(usize::MAX);
+        from_order < to_order
+    };
+
+    let mut selected: Vec<crate::ir::Edge> = Vec::new();
+    let mut selected_adj: HashMap<String, Vec<String>> = HashMap::new();
+
+    for edge in layout_edges {
+        if edge.style != crate::ir::EdgeStyle::Dotted && is_forward(edge) {
+            add_rank_edge_if_useful(edge, &mut selected, &mut selected_adj);
+        }
+    }
+    for edge in layout_edges {
+        if edge.style == crate::ir::EdgeStyle::Dotted && is_forward(edge) {
+            add_rank_edge_if_useful(edge, &mut selected, &mut selected_adj);
+        }
+    }
+    for edge in layout_edges {
+        if edge.style != crate::ir::EdgeStyle::Dotted {
+            add_rank_edge_if_useful(edge, &mut selected, &mut selected_adj);
+        }
+    }
+    for edge in layout_edges {
+        if edge.style == crate::ir::EdgeStyle::Dotted {
+            add_rank_edge_if_useful(edge, &mut selected, &mut selected_adj);
+        }
+    }
+
+    let min_covered = layout_node_ids.len().div_ceil(2);
+    if rank_edge_coverage(&selected) >= min_covered {
+        return selected;
+    }
+
     let primary: Vec<crate::ir::Edge> = layout_edges
         .iter()
         .filter(|edge| edge.style != crate::ir::EdgeStyle::Dotted)
@@ -21,17 +71,69 @@ pub(super) fn rank_edges_for_manual_layout(
         return layout_edges.to_vec();
     }
 
-    let mut covered: HashSet<&str> = HashSet::new();
-    for edge in &primary {
-        covered.insert(edge.from.as_str());
-        covered.insert(edge.to.as_str());
-    }
-    let min_covered = layout_node_ids.len().div_ceil(2);
-    if covered.len() >= min_covered {
+    if rank_edge_coverage(&primary) >= min_covered {
         return primary;
     }
 
+    if !selected.is_empty() {
+        return selected;
+    }
+
     layout_edges.to_vec()
+}
+
+fn rank_edge_coverage(edges: &[crate::ir::Edge]) -> usize {
+    let mut covered: HashSet<&str> = HashSet::new();
+    for edge in edges {
+        covered.insert(edge.from.as_str());
+        covered.insert(edge.to.as_str());
+    }
+    covered.len()
+}
+
+fn add_rank_edge_if_useful(
+    edge: &crate::ir::Edge,
+    selected: &mut Vec<crate::ir::Edge>,
+    adjacency: &mut HashMap<String, Vec<String>>,
+) -> bool {
+    if edge.from == edge.to {
+        return false;
+    }
+    if path_exists(adjacency, &edge.from, &edge.to) {
+        return false;
+    }
+    if path_exists(adjacency, &edge.to, &edge.from) {
+        return false;
+    }
+    selected.push(edge.clone());
+    adjacency
+        .entry(edge.from.clone())
+        .or_default()
+        .push(edge.to.clone());
+    true
+}
+
+fn path_exists(adjacency: &HashMap<String, Vec<String>>, from: &str, to: &str) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut stack = vec![from];
+    let mut visited: HashSet<&str> = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let Some(nexts) = adjacency.get(node) else {
+            continue;
+        };
+        for next in nexts {
+            if next == to {
+                return true;
+            }
+            stack.push(next.as_str());
+        }
+    }
+    false
 }
 
 pub(super) fn order_rank_nodes(
@@ -120,7 +222,7 @@ pub(super) fn order_rank_nodes(
     }
 }
 
-fn pair_crossings(
+pub(super) fn pair_crossings(
     a: &str,
     b: &str,
     neighbors: &HashMap<String, Vec<String>>,

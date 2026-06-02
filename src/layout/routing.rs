@@ -355,6 +355,7 @@ pub(super) struct RouteContext<'a> {
     pub(super) end_offset: f32,
     pub(super) stub_len: f32,
     pub(super) prefer_shorter_ties: bool,
+    pub(super) allow_direct_hit_band_detours: bool,
     pub(super) preferred_label_id: Option<&'a str>,
     pub(super) preferred_label_center: Option<(f32, f32)>,
 }
@@ -1230,7 +1231,7 @@ pub(super) fn route_edge_with_avoidance(
         let mut via_distances: Vec<f32> = Vec::new();
 
         let pad = ctx.config.node_spacing.max(ROUTING_PAD_MIN_SPACING) * ROUTING_PAD_RATIO;
-        for points in route_self_loop_candidates(ctx.from, pad) {
+        for points in route_self_loop_candidates(ctx.from, pad, ctx.direction) {
             push_route_candidate_metrics(
                 points,
                 ctx,
@@ -1410,9 +1411,21 @@ pub(super) fn route_edge_with_avoidance(
     let existing_segments = existing.unwrap_or(&[]);
     let use_existing = !existing_segments.is_empty();
 
-    // For backward edges, try routing around obstacles (both left and right)
-    if is_backward {
+    let direct_obstacle_hits = path_obstacle_intersections(
+        &[route_start, route_end],
+        ctx.obstacles,
+        ctx.from_id,
+        ctx.to_id,
+    );
+
+    // Backward edges and long forward edges whose direct span is blocked both
+    // need whole-band detour candidates. Otherwise a same-direction edge can
+    // cut through an unrelated node when the local midpoint offsets are too
+    // small to escape the blocked band.
+    if is_backward || (ctx.allow_direct_hit_band_detours && direct_obstacle_hits > 0) {
         let pad = ctx.config.node_spacing.max(30.0);
+        let use_main_axis_side_detours = is_backward || !is_horizontal(ctx.direction);
+        let use_cross_axis_band_detours = is_backward || is_horizontal(ctx.direction);
         // Find the extents of any obstacle that blocks the direct path
         let mut min_left = f32::MAX;
         let mut max_right = 0.0f32;
@@ -1448,7 +1461,7 @@ pub(super) fn route_edge_with_avoidance(
         }
 
         // Try routing around the right side first
-        if max_right > 0.0 {
+        if use_main_axis_side_detours && max_right > 0.0 {
             let route_x = max_right + pad;
             let points = vec![
                 route_start,
@@ -1471,7 +1484,7 @@ pub(super) fn route_edge_with_avoidance(
         }
 
         // Try routing under all blocking obstacles
-        if max_bottom > 0.0 {
+        if use_cross_axis_band_detours && max_bottom > 0.0 {
             let route_y = max_bottom + pad;
             let points = vec![
                 route_start,
@@ -1494,7 +1507,7 @@ pub(super) fn route_edge_with_avoidance(
         }
 
         // Try routing above all blocking obstacles
-        if min_top < f32::MAX {
+        if use_cross_axis_band_detours && min_top < f32::MAX {
             let route_y = min_top - pad;
             let points = vec![
                 route_start,
@@ -1517,7 +1530,7 @@ pub(super) fn route_edge_with_avoidance(
         }
 
         // Try routing around the left side
-        if min_left < f32::MAX {
+        if use_main_axis_side_detours && min_left < f32::MAX {
             let route_x = min_left - pad;
             let points = vec![
                 route_start,
@@ -1873,7 +1886,7 @@ pub(super) fn route_edge_with_avoidance(
     }
 
     let min_hits = intersections.iter().copied().min().unwrap_or(0);
-    if (min_hits > 0 || needs_detour)
+    if (min_hits > 0 || needs_detour || is_backward)
         && let Some(grid) = grid
         && let Some(points) = route_edge_with_grid(ctx, grid, occupancy, route_start, route_end)
     {
@@ -2229,7 +2242,11 @@ pub(super) fn route_self_loop(
     }
 }
 
-pub(super) fn route_self_loop_candidates(node: &NodeLayout, pad: f32) -> Vec<Vec<(f32, f32)>> {
+pub(super) fn route_self_loop_candidates(
+    node: &NodeLayout,
+    pad: f32,
+    direction: Direction,
+) -> Vec<Vec<(f32, f32)>> {
     let x = node.x;
     let y = node.y;
     let w = node.width;
@@ -2245,7 +2262,50 @@ pub(super) fn route_self_loop_candidates(node: &NodeLayout, pad: f32) -> Vec<Vec
     let top_y = y - pad;
     let bottom_y = y + h + pad;
 
-    vec![
+    let horizontal_offset = (w * 0.24).min((w / 2.0 - 2.0).max(0.0));
+    let vertical_offset = (h * 0.24).min((h / 2.0 - 2.0).max(0.0));
+    let top_left = anchor_point_for_node(node, EdgeSide::Top, -horizontal_offset);
+    let top_right = anchor_point_for_node(node, EdgeSide::Top, horizontal_offset);
+    let bottom_left = anchor_point_for_node(node, EdgeSide::Bottom, -horizontal_offset);
+    let bottom_right = anchor_point_for_node(node, EdgeSide::Bottom, horizontal_offset);
+    let left_top = anchor_point_for_node(node, EdgeSide::Left, -vertical_offset);
+    let left_bottom = anchor_point_for_node(node, EdgeSide::Left, vertical_offset);
+    let right_top = anchor_point_for_node(node, EdgeSide::Right, -vertical_offset);
+    let right_bottom = anchor_point_for_node(node, EdgeSide::Right, vertical_offset);
+
+    let top_cap = vec![
+        top_left,
+        (top_left.0, top_y),
+        (top_right.0, top_y),
+        top_right,
+    ];
+    let bottom_cap = vec![
+        bottom_left,
+        (bottom_left.0, bottom_y),
+        (bottom_right.0, bottom_y),
+        bottom_right,
+    ];
+    let right_cap = vec![
+        right_top,
+        (right_x, right_top.1),
+        (right_x, right_bottom.1),
+        right_bottom,
+    ];
+    let left_cap = vec![
+        left_top,
+        (left_x, left_top.1),
+        (left_x, left_bottom.1),
+        left_bottom,
+    ];
+
+    let mut candidates = Vec::new();
+    if is_horizontal(direction) {
+        candidates.extend([top_cap, bottom_cap, right_cap, left_cap]);
+    } else {
+        candidates.extend([right_cap, left_cap, bottom_cap, top_cap]);
+    }
+
+    candidates.extend([
         // Right-side loops
         vec![right, (right_x, cy), (right_x, top_y), (cx, top_y), top],
         vec![
@@ -2282,7 +2342,8 @@ pub(super) fn route_self_loop_candidates(node: &NodeLayout, pad: f32) -> Vec<Vec
             (left_x, cy),
             left,
         ],
-    ]
+    ]);
+    candidates
 }
 
 pub(super) fn build_obstacles(

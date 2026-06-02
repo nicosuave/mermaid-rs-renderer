@@ -14,6 +14,7 @@ const LABEL_ANCHOR_POS_EPS: f32 = 1.0;
 const LABEL_ANCHOR_DIR_EPS: f32 = 0.02;
 const LABEL_EXTRA_SEGMENT_ANCHORS: usize = 6;
 const FLOWCHART_LABEL_CLEARANCE_PAD: f32 = 1.5;
+const LABEL_BOUNDARY_GUTTER: f32 = 10.0;
 
 type Rect = (f32, f32, f32, f32);
 type EdgeObstacle = (usize, Rect);
@@ -3085,10 +3086,10 @@ fn clamp_label_center_to_bounds(
     if w <= 0.0 || h <= 0.0 {
         return center;
     }
-    let min_x = label_w * 0.5 + pad_x;
-    let min_y = label_h * 0.5 + pad_y;
-    let max_x = w - label_w * 0.5 - pad_x;
-    let max_y = h - label_h * 0.5 - pad_y;
+    let min_x = label_w * 0.5 + pad_x + LABEL_BOUNDARY_GUTTER;
+    let min_y = label_h * 0.5 + pad_y + LABEL_BOUNDARY_GUTTER;
+    let max_x = w - label_w * 0.5 - pad_x - LABEL_BOUNDARY_GUTTER;
+    let max_y = h - label_h * 0.5 - pad_y - LABEL_BOUNDARY_GUTTER;
 
     let x = if max_x < min_x {
         w * 0.5

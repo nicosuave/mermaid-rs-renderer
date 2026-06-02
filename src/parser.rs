@@ -606,6 +606,18 @@ fn split_class_body(body: &str) -> Vec<String> {
     entries
 }
 
+fn display_class_stereotype(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('«') && trimmed.ends_with('»') {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with("<<") && trimmed.ends_with(">>") && trimmed.len() >= 4 {
+        let inner = trimmed[2..trimmed.len() - 2].trim();
+        return format!("«{inner}»");
+    }
+    format!("«{trimmed}»")
+}
+
 fn normalize_class_method_signature(entry: &str) -> String {
     let trimmed = entry.trim();
     let Some(close_idx) = trimmed.find(')') else {
@@ -1291,7 +1303,7 @@ fn parse_class_diagram(input: &str) -> Result<ParseOutput> {
             .unwrap_or_else(|| node.label.clone());
         let mut lines = Vec::new();
         if let Some(items) = stereotypes.get(id) {
-            lines.extend(items.iter().cloned());
+            lines.extend(items.iter().map(|item| display_class_stereotype(item)));
         }
         lines.push(class_name.clone());
         if let Some(items) = members.get(id)
@@ -4446,11 +4458,20 @@ fn parse_state_diagram(input: &str) -> Result<ParseOutput> {
 
             if let Some((left, meta, right, label)) = parse_state_transition(line) {
                 // Determine current scope for start/end state tracking
-                let scope = subgraph_stack
-                    .last()
-                    .and_then(|&idx| graph.subgraphs.get(idx))
-                    .and_then(|sub| sub.id.clone())
-                    .unwrap_or_else(|| "root".to_string());
+                let scope = if let Some(ctx) = composite_stack.last() {
+                    let composite_id = graph
+                        .subgraphs
+                        .get(ctx.subgraph_idx)
+                        .and_then(|sub| sub.id.clone())
+                        .unwrap_or_else(|| "root".to_string());
+                    format!("{}__region_{}", composite_id, ctx.current_region)
+                } else {
+                    subgraph_stack
+                        .last()
+                        .and_then(|&idx| graph.subgraphs.get(idx))
+                        .and_then(|sub| sub.id.clone())
+                        .unwrap_or_else(|| "root".to_string())
+                };
                 let (left_token, left_classes) = split_inline_classes(&left);
                 let (right_token, right_classes) = split_inline_classes(&right);
                 let (left_id, left_shape, left_label_override) = normalize_state_token(
@@ -4692,6 +4713,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
             open_frames.push(crate::ir::SequenceFrame {
                 kind,
                 sections: vec![crate::ir::SequenceFrameSection {
+                    operator: None,
                     label,
                     start_idx,
                     end_idx: start_idx,
@@ -4715,6 +4737,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
                     Some(strip_quotes(label))
                 };
                 frame.sections.push(crate::ir::SequenceFrameSection {
+                    operator: Some("else".to_string()),
                     label,
                     start_idx: split_idx,
                     end_idx: split_idx,
@@ -4738,6 +4761,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
                     Some(strip_quotes(label))
                 };
                 frame.sections.push(crate::ir::SequenceFrameSection {
+                    operator: Some("and".to_string()),
                     label,
                     start_idx: split_idx,
                     end_idx: split_idx,
@@ -4761,6 +4785,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
                     Some(strip_quotes(label))
                 };
                 frame.sections.push(crate::ir::SequenceFrameSection {
+                    operator: Some("option".to_string()),
                     label,
                     start_idx: split_idx,
                     end_idx: split_idx,
@@ -6252,11 +6277,11 @@ A["foo & bar"] & B --> C"#;
         let parsed = parse_mermaid(input).unwrap();
         assert_eq!(
             parsed.graph.nodes.get("Animal").unwrap().label,
-            "<<interface>>\nAnimal"
+            "«interface»\nAnimal"
         );
         assert_eq!(
             parsed.graph.nodes.get("Duck").unwrap().label,
-            "<<service>>\nDuck\n---\n+quack()"
+            "«service»\nDuck\n---\n+quack()"
         );
     }
 

@@ -296,6 +296,7 @@ pub struct StateNote {
 
 #[derive(Debug, Clone)]
 pub struct SequenceFrameSection {
+    pub operator: Option<String>,
     pub label: Option<String>,
     pub start_idx: usize,
     pub end_idx: usize,
